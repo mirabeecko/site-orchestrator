@@ -1,0 +1,220 @@
+
+name: Provision new website repo
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_slug:
+        description: "Repo name (e.g. acme-plumbing)"
+        required: true
+        type: string
+      template_key:
+        description: "Template key (next-landing | next-local-service | next-portfolio)"
+        required: true
+        type: string
+      customer_name:
+        description: "Customer / project display name"
+        required: false
+        type: string
+      project_brief_json:
+        description: "JSON brief (string)."
+        required: true
+        type: string
+      private_repo:
+        description: "Create private repository?"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log Project to Google Sheets (non-blocking)
+        continue-on-error: true
+        env:
+          GSHEETS_WEBHOOK_URL: ${{ secrets.GSHEETS_WEBHOOK_URL }}
+          GSHEETS_WEBHOOK_TOKEN: ${{ secrets.GSHEETS_WEBHOOK_TOKEN }}
+        run: |
+          set -e
+          curl -sS -X POST "$GSHEETS_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"token\": \"${GSHEETS_WEBHOOK_TOKEN}\",
+              \"action\": \"upsertProject\",
+              \"project\": {
+                \"project_slug\": \"${{ inputs.project_slug }}\",
+                \"customer_name\": \"${{ inputs.customer_name }}\",
+                \"repo_url\": \"https://github.com/${{ github.repository_owner }}/${{ inputs.project_slug }}\",
+                \"template_key\": \"${{ inputs.template_key }}\",
+                \"status\": \"IN_PROGRESS\"
+              }
+            }"
+
+      - name: Log RUN STARTED to Google Sheets (non-blocking)
+        continue-on-error: true
+        env:
+          GSHEETS_WEBHOOK_URL: ${{ secrets.GSHEETS_WEBHOOK_URL }}
+          GSHEETS_WEBHOOK_TOKEN: ${{ secrets.GSHEETS_WEBHOOK_TOKEN }}
+        run: |
+          set -e
+          RUN_ID="${{ github.run_id }}-PROVISION"
+          DETAILS_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -sS -X POST "$GSHEETS_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"token\": \"${GSHEETS_WEBHOOK_TOKEN}\",
+              \"action\": \"upsertRun\",
+              \"run\": {
+                \"run_id\": \"${RUN_ID}\",
+                \"project_slug\": \"${{ inputs.project_slug }}\",
+                \"stage\": \"PROVISION\",
+                \"status\": \"STARTED\",
+                \"message\": \"Provisioning repo from template\",
+                \"repo_url\": \"https://github.com/${{ github.repository_owner }}/${{ inputs.project_slug }}\",
+                \"details_url\": \"${DETAILS_URL}\"
+              }
+            }"
+
+      - name: Resolve template repo from template_key
+        id: tpl
+        run: |
+          case "${{ inputs.template_key }}" in
+            next-landing)
+              echo "template_owner=${{ github.repository_owner }}" >> $GITHUB_OUTPUT
+              echo "template_repo=template-next-landing" >> $GITHUB_OUTPUT
+              ;;
+            next-local-service)
+              echo "template_owner=${{ github.repository_owner }}" >> $GITHUB_OUTPUT
+              echo "template_repo=template-next-local-service" >> $GITHUB_OUTPUT
+              ;;
+            next-portfolio)
+              echo "template_owner=${{ github.repository_owner }}" >> $GITHUB_OUTPUT
+              echo "template_repo=template-next-portfolio" >> $GITHUB_OUTPUT
+              ;;
+            *)
+              echo "Unknown template_key: ${{ inputs.template_key }}"
+              exit 1
+              ;;
+          esac
+
+      - name: Create repo from template (GitHub API)
+        env:
+          GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+        run: |
+          set -e
+          OWNER="${{ github.repository_owner }}"
+          NEW_REPO="${{ inputs.project_slug }}"
+          TEMPLATE_OWNER="${{ steps.tpl.outputs.template_owner }}"
+          TEMPLATE_REPO="${{ steps.tpl.outputs.template_repo }}"
+          PRIVATE="${{ inputs.private_repo }}"
+
+          curl -sS -X POST \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/$TEMPLATE_OWNER/$TEMPLATE_REPO/generate \
+            -d "{
+              \"owner\": \"$OWNER\",
+              \"name\": \"$NEW_REPO\",
+              \"private\": $PRIVATE,
+              \"include_all_branches\": false
+            }" | jq -e '.full_name' >/dev/null
+
+      - name: Wait for repo to be ready
+        env:
+          GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+        run: |
+          set -e
+          OWNER="${{ github.repository_owner }}"
+          NEW_REPO="${{ inputs.project_slug }}"
+          for i in {1..30}; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "Authorization: token $GH_TOKEN" \
+              https://api.github.com/repos/$OWNER/$NEW_REPO)
+            if [ "$code" = "200" ]; then exit 0; fi
+            sleep 2
+          done
+          exit 1
+
+      - name: Checkout newly created repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/${{ inputs.project_slug }}
+          token: ${{ secrets.ORG_ADMIN_TOKEN }}
+          path: target
+
+      - name: Write brief into repo
+        run: |
+          set -e
+          cd target
+          mkdir -p .project
+          echo '${{ inputs.project_brief_json }}' > .project/projectBrief.json
+          if [ -n "${{ inputs.customer_name }}" ]; then
+            echo "${{ inputs.customer_name }}" > .project/customerName.txt
+          fi
+
+      - name: Commit & push brief
+        run: |
+          set -e
+          cd target
+          git config user.name "provision-bot"
+          git config user.email "provision-bot@users.noreply.github.com"
+          git add .project/projectBrief.json .project/customerName.txt || true
+          git commit -m "chore: add project brief" || echo "Nothing to commit"
+          git push
+
+      - name: Log RUN OK to Google Sheets (non-blocking)
+        if: ${{ success() }}
+        continue-on-error: true
+        env:
+          GSHEETS_WEBHOOK_URL: ${{ secrets.GSHEETS_WEBHOOK_URL }}
+          GSHEETS_WEBHOOK_TOKEN: ${{ secrets.GSHEETS_WEBHOOK_TOKEN }}
+        run: |
+          set -e
+          RUN_ID="${{ github.run_id }}-PROVISION"
+          DETAILS_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -sS -X POST "$GSHEETS_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"token\": \"${GSHEETS_WEBHOOK_TOKEN}\",
+              \"action\": \"upsertRun\",
+              \"run\": {
+                \"run_id\": \"${RUN_ID}\",
+                \"project_slug\": \"${{ inputs.project_slug }}\",
+                \"stage\": \"PROVISION\",
+                \"status\": \"OK\",
+                \"message\": \"Repo provisioned and brief committed\",
+                \"repo_url\": \"https://github.com/${{ github.repository_owner }}/${{ inputs.project_slug }}\",
+                \"runlog_path\": \".project/projectBrief.json\",
+                \"details_url\": \"${DETAILS_URL}\"
+              }
+            }"
+
+      - name: Log RUN FAIL to Google Sheets (non-blocking)
+        if: ${{ failure() }}
+        continue-on-error: true
+        env:
+          GSHEETS_WEBHOOK_URL: ${{ secrets.GSHEETS_WEBHOOK_URL }}
+          GSHEETS_WEBHOOK_TOKEN: ${{ secrets.GSHEETS_WEBHOOK_TOKEN }}
+        run: |
+          set -e
+          RUN_ID="${{ github.run_id }}-PROVISION"
+          DETAILS_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -sS -X POST "$GSHEETS_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"token\": \"${GSHEETS_WEBHOOK_TOKEN}\",
+              \"action\": \"upsertRun\",
+              \"run\": {
+                \"run_id\": \"${RUN_ID}\",
+                \"project_slug\": \"${{ inputs.project_slug }}\",
+                \"stage\": \"PROVISION\",
+                \"status\": \"FAIL\",
+                \"message\": \"Provision failed (see GitHub Actions logs)\",
+                \"repo_url\": \"https://github.com/${{ github.repository_owner }}/${{ inputs.project_slug }}\",
+                \"details_url\": \"${DETAILS_URL}\"
+              }
+            }"
