@@ -9,7 +9,7 @@ on:
         required: true
         type: string
       template_key:
-        description: "Template key (next-landing | next-local-service | next-portfolio)"
+        description: "Template key (html-landing | html-local-service | html-portfolio)"
         required: true
         type: string
       customer_name:
@@ -83,20 +83,21 @@ jobs:
         id: tpl
         run: |
           case "${{ inputs.template_key }}" in
-            next-landing)
+            html-landing)
               echo "template_owner=${{ github.repository_owner }}" >> $GITHUB_OUTPUT
-              echo "template_repo=template-next-landing" >> $GITHUB_OUTPUT
+              echo "template_repo=template-html-landing" >> $GITHUB_OUTPUT
               ;;
-            next-local-service)
+            html-local-service)
               echo "template_owner=${{ github.repository_owner }}" >> $GITHUB_OUTPUT
-              echo "template_repo=template-next-local-service" >> $GITHUB_OUTPUT
+              echo "template_repo=template-html-local-service" >> $GITHUB_OUTPUT
               ;;
-            next-portfolio)
+            html-portfolio)
               echo "template_owner=${{ github.repository_owner }}" >> $GITHUB_OUTPUT
-              echo "template_repo=template-next-portfolio" >> $GITHUB_OUTPUT
+              echo "template_repo=template-html-portfolio" >> $GITHUB_OUTPUT
               ;;
             *)
               echo "Unknown template_key: ${{ inputs.template_key }}"
+              echo "Use: html-landing | html-local-service | html-portfolio"
               exit 1
               ;;
           esac
