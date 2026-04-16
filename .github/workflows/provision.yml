@@ -124,20 +124,41 @@ jobs:
               \"include_all_branches\": false
             }" | jq -e '.full_name' >/dev/null
 
-      - name: Wait for repo to be ready
+      - name: Wait for repo + main branch to be ready
         env:
           GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
         run: |
           set -e
           OWNER="${{ github.repository_owner }}"
           NEW_REPO="${{ inputs.project_slug }}"
+
+          echo "Waiting for repository to exist..."
           for i in {1..30}; do
             code=$(curl -s -o /dev/null -w "%{http_code}" \
               -H "Authorization: token $GH_TOKEN" \
               https://api.github.com/repos/$OWNER/$NEW_REPO)
-            if [ "$code" = "200" ]; then exit 0; fi
+            if [ "$code" = "200" ]; then
+              echo "Repo exists."
+              break
+            fi
+            echo "Waiting for repo... ($i)"
             sleep 2
           done
+
+          echo "Waiting for main branch ref..."
+          for i in {1..60}; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "Authorization: token $GH_TOKEN" \
+              https://api.github.com/repos/$OWNER/$NEW_REPO/git/ref/heads/main)
+            if [ "$code" = "200" ]; then
+              echo "main branch is ready."
+              exit 0
+            fi
+            echo "Waiting for main... ($i)"
+            sleep 2
+          done
+
+          echo "main branch not ready in time"
           exit 1
 
       - name: Checkout newly created repo
@@ -145,6 +166,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/${{ inputs.project_slug }}
           token: ${{ secrets.ORG_ADMIN_TOKEN }}
+          ref: main
           path: target
 
       - name: Write brief into repo
